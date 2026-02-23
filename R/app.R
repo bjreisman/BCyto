@@ -634,6 +634,18 @@ initializing <- function() {
   bc$gs <- gs_clone(bc$uncompGS)
   cf <- gs_get_cytoframe(bc$gs, bc$onlySampleIDs[1])
   colnames(bc$gs) <- colnames(cs)
+  # Detect instrument data range from FCS metadata ($PnR)
+  ff_temp <- cytoframe_to_flowFrame(cs[[1]])
+  pnr_ranges <- ff_temp@parameters@data$range
+  param_names <- ff_temp@parameters@data$name
+  scatter_idx <- grep("FS|SS", param_names)
+  fluo_idx <- which(!grepl("FS|SS|Time|Height|Width", param_names))
+  bc$maxValue <- max(pnr_ranges[fluo_idx], na.rm = TRUE)
+  if (is.na(bc$maxValue) || bc$maxValue <= 0) bc$maxValue <- 262144
+  bc$scatterMax <- max(pnr_ranges[scatter_idx], na.rm = TRUE)
+  if (is.na(bc$scatterMax) || bc$scatterMax <= 0) bc$scatterMax <- 262144
+  bc$scatterLim <- round(bc$scatterMax * 1.008)
+  bc$fluoLim <- 4100
   preFluoChannels <- colnames(bc$gs)[!grepl("FS", colnames(bc$gs))]
   preFluoChannels <- preFluoChannels[!grepl("SS", preFluoChannels)]
   preFluoChannels <- preFluoChannels[preFluoChannels != "Time"]
@@ -652,7 +664,7 @@ initializing <- function() {
   rownames(bc$compDFs[[1]]) <- colnames(bc$compDFs[[1]])
   compensate(bc$gs, bc$compDFs[[1]])
   bc$customAxis <- rep(list(c(4.42, 0, -100)), length(bc$fluoCh))
-  biexp <- flowjo_biexp_trans(channelRange=4096, maxValue=262144,
+  biexp <- flowjo_biexp_trans(channelRange=4096, maxValue=bc$maxValue,
                               pos=bc$customAxis[[1]][1],
                               neg=bc$customAxis[[1]][2],
                               widthBasis=bc$customAxis[[1]][3])
@@ -746,7 +758,7 @@ axisTTime <- function(axisID) {
 }
 
 axisTLog <- function(axisID, customAxis) {
-  trans <- flowjo_biexp(channelRange=4096, maxValue=262144,
+  trans <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                         pos=customAxis[1],
                         neg=customAxis[2],
                         widthBasis=customAxis[3])
@@ -781,12 +793,17 @@ axisTLog <- function(axisID, customAxis) {
 }
 
 axisTCont <- function(axisID) {
-  majorT <- seq(0, 250000, by=50000)
-  minorT <- seq(0, 260000, by=10000)
+  majorT <- pretty(c(0, bc$scatterMax), n=5)
+  majorT <- majorT[majorT >= 0 & majorT <= bc$scatterLim]
+  minorStep <- diff(majorT[1:2]) / 5
+  minorT <- seq(0, max(majorT) + minorStep, by=minorStep)
   axis(axisID, at=majorT, lwd=2, labels=FALSE)
   axis(axisID, at=minorT, lwd=1, labels=FALSE, tck=-0.015)
+  labels <- ifelse(majorT >= 1000,
+                   paste0(majorT / 1000, "K"),
+                   as.character(majorT))
   axis(axisID, at=majorT, lwd=0, cex.axis=1.1, line=-0.3, las=1,
-       labels=c("0", "50K", "100K", "150K", "200K", "250K"))
+       labels=labels)
 }
 
 axisTHist <- function(axisID) {
@@ -845,16 +862,16 @@ newPlot <- function(ID, X, Y, parent, typ, axis, font, bgDF=NULL, bg=FALSE) {
     if(X == "Time") {
       xLim <- NULL
     } else if(grepl("FS", X) || grepl("SS", X)) {
-      xLim <- c(0, 264000)
+      xLim <- c(0, bc$scatterLim)
     } else {
-      xLim <- c(0, 4100)
+      xLim <- c(0, bc$fluoLim)
     }
     bc$dF <- as.data.frame.array(ff@exprs)
     dfX <- bc$dF[,X]
     dfX[dfX < 0] <- 0
 
     if(grepl("FS", X) || grepl("SS", X)) {
-      dfX[dfX > 264000] <- 264000
+      dfX[dfX > bc$scatterLim] <- bc$scatterLim
     }
     if(typ != "Histogram") {
       newDotPlot(dfX, X, Y, typ, axis, font, bgDF, xLim)
@@ -892,10 +909,10 @@ newDotPlot <- function(dfX, X, Y, typ, axis, font, bgDF, xLim) {
   if(Y == "Time") {
     yLim <- NULL
   } else if(grepl("FS", Y) || grepl("SS", Y)) {
-    yLim <- c(0, 264000)
-    dfY[dfY > 264000] <- 264000
+    yLim <- c(0, bc$scatterLim)
+    dfY[dfY > bc$scatterLim] <- bc$scatterLim
   } else {
-    yLim <- c(0, 4100)
+    yLim <- c(0, bc$fluoLim)
   }
   if(typ == "Backgating") {
     plot(dfX, dfY, xaxt="n", yaxt="n", ann=FALSE, pch=20, cex=0.5,
@@ -1199,7 +1216,7 @@ compGen <- function(ID, newMatrix, ov, parent="root") {
     compensate(cf, newMatrix)
   }
   for(i in seq(bc$fluoCh)) {
-    trans <- flowjo_biexp_trans(channelRange=4096, maxValue=262144,
+    trans <- flowjo_biexp_trans(channelRange=4096, maxValue=bc$maxValue,
                                 pos=bc$customAxis[[i]][1],
                                 neg=bc$customAxis[[i]][2],
                                 widthBasis=bc$customAxis[[i]][3])
@@ -1219,7 +1236,7 @@ compGen <- function(ID, newMatrix, ov, parent="root") {
     list(c(unlist(byRows)[i], unlist(byCols)[i])), list(2))
   range <- vapply(seq_len(11), function(i)
     list(c(9*i-9, 9*i)), list(2))
-  lim <- c(0, 4100)
+  lim <- c(0, bc$fluoLim)
   id <- 0
   for(i in seq(plotN)) {
     for(j in seq(plotN + 1 - i)) {
@@ -1400,9 +1417,9 @@ overlay <- function(IDs, X, Y, parent, typ, tone, axis, font) {
     if(X == "Time") {
       bc$xLim <- NULL
     } else if(grepl("FS", X) || grepl("SS", X)) {
-      bc$xLim <- c(0, 264000)
+      bc$xLim <- c(0, bc$scatterLim)
     } else {
-      bc$xLim <- c(0, 4100)
+      bc$xLim <- c(0, bc$fluoLim)
     }
     setColor(IDs, typ, tone)
     dfs <- vapply(cfs, function(x)
@@ -1480,9 +1497,9 @@ ovDotPlot <- function(IDs, Y, dfs, dfsX) {
   if(Y == "Time") {
     bc$yLim <- NULL
   } else if(grepl("FS", Y) || grepl("SS", Y)) {
-    bc$yLim <- c(0, 264000)
+    bc$yLim <- c(0, bc$scatterLim)
   } else {
-    bc$yLim <- c(0, 4100)
+    bc$yLim <- c(0, bc$fluoLim)
   }
   dfFinal <- data.frame("X"=dfsX[[1]], "Y"=dfsY[[1]],
                         "color"=bc$colorList[1])
@@ -1692,7 +1709,7 @@ prolifReady <- function(dfX, ref, lab, grid) {
     if(i == 1) {
       bc$gatecoords[[i]] <- c(0, bc$betweenPeaks[1])
     } else if(i == nrow(bc$refPeaks)) {
-      bc$gatecoords[[i]] <- c(bc$betweenPeaks[i-1], 4100)
+      bc$gatecoords[[i]] <- c(bc$betweenPeaks[i-1], bc$fluoLim)
     } else {
       bc$gatecoords[[i]] <- c(bc$betweenPeaks[i-1],
                               bc$betweenPeaks[i])
@@ -2702,7 +2719,7 @@ server <- function(input, output, session) {
 
   output$axisplot <- renderPlot({
     par(mar=c(4,6,1,1) + 0.1, lwd=2)
-    inverseT <- flowjo_biexp(channelRange=4096, maxValue=262144,
+    inverseT <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                              pos=bc$val[1],
                              neg=bc$val[2],
                              widthBasis=bc$val[3],
@@ -2715,13 +2732,13 @@ server <- function(input, output, session) {
     } else if(input$widthslider <= 3) {
       bc$widthBasis <- round(bc$widthBasis)
     }
-    trans <- flowjo_biexp(channelRange=4096, maxValue=262144,
+    trans <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                           pos=input$posslider,
                           neg=input$negslider,
                           widthBasis=as.numeric(bc$widthBasis))
     unTransDF <- inverseT(bc$dF[,reactAxisCustom$d])
     tempDF <- trans(unTransDF)
-    xLim <- c(0, 4100)
+    xLim <- c(0, bc$fluoLim)
     if(length(tempDF) > 1) {
       referenceHist <- hist(tempDF, breaks=20, plot=FALSE)
       refCounts <- referenceHist$counts
@@ -2750,12 +2767,12 @@ server <- function(input, output, session) {
     newA <- c(input$posslider, input$negslider,
               as.numeric(bc$widthBasis))
     if(!identical(currentA, newA)) {
-      inverseT <- flowjo_biexp(channelRange=4096, maxValue=262144,
+      inverseT <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                                pos=currentA[1],
                                neg=currentA[2],
                                widthBasis=currentA[3],
                                inverse=TRUE)
-      trans <- flowjo_biexp(channelRange=4096, maxValue=262144,
+      trans <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                             pos=input$posslider,
                             neg=input$negslider,
                             widthBasis=as.numeric(bc$widthBasis))
@@ -2766,14 +2783,14 @@ server <- function(input, output, session) {
       names(bc$customAxis) <- bc$fluoCh
       for(i in bc$fluoCh[bc$fluoCh != reactAxisCustom$d]) {
         transSub <- flowjo_biexp_trans(channelRange=4096,
-                                       maxValue=262144,
+                                       maxValue=bc$maxValue,
                                        pos=bc$customAxis[[i]][1],
                                        neg=bc$customAxis[[i]][2],
                                        widthBasis=bc$customAxis[[i]][3]
         )
         bc$gs <- transform(bc$gs, transformerList(i, transSub))
       }
-      transSub <- flowjo_biexp_trans(channelRange=4096, maxValue=262144,
+      transSub <- flowjo_biexp_trans(channelRange=4096, maxValue=bc$maxValue,
                                      pos=input$posslider,
                                      neg=input$negslider,
                                      widthBasis=as.numeric(bc$widthBasis)
@@ -3854,7 +3871,7 @@ server <- function(input, output, session) {
     bc$gs <- gs_clone(tempEnv$gs)
     names(bc$customAxis) <- bc$fluoCh
     for(i in seq(bc$fluoCh)) {
-      trans <- flowjo_biexp_trans(channelRange=4096, maxValue=262144,
+      trans <- flowjo_biexp_trans(channelRange=4096, maxValue=bc$maxValue,
                                   pos=bc$customAxis[[i]][1],
                                   neg=bc$customAxis[[i]][2],
                                   widthBasis=bc$customAxis[[i]][3])
@@ -4731,7 +4748,7 @@ server <- function(input, output, session) {
       }
     }
     for(i in seq(bc$fluoCh)) {
-      trans <- flowjo_biexp(channelRange=4096, maxValue=262144,
+      trans <- flowjo_biexp(channelRange=4096, maxValue=bc$maxValue,
                             pos=bc$customAxis[[i]][1],
                             neg=bc$customAxis[[i]][2],
                             widthBasis=bc$customAxis[[i]][3],
@@ -5193,7 +5210,7 @@ server <- function(input, output, session) {
     if(input$tabs == "compTab") {
       bc$uncompGSfortable <- gs_clone(bc$uncompGS)
       for(i in seq(bc$fluoCh)) {
-        trans <- flowjo_biexp_trans(channelRange=4096, maxValue=262144,
+        trans <- flowjo_biexp_trans(channelRange=4096, maxValue=bc$maxValue,
                                     pos=bc$customAxis[[i]][1],
                                     neg=bc$customAxis[[i]][2],
                                     widthBasis=bc$customAxis[[i]][3])
@@ -5593,6 +5610,11 @@ server <- function(input, output, session) {
                                    tempFilePath[[1]]), bc)
                      }
                      bc$sampleList <- bc$fileList[bc$onlySampleIDs]
+                     # Backwards compatibility for saved files without range info
+                     if (is.null(bc$maxValue)) bc$maxValue <- 262144
+                     if (is.null(bc$scatterMax)) bc$scatterMax <- 262144
+                     if (is.null(bc$scatterLim)) bc$scatterLim <- round(bc$scatterMax * 1.008)
+                     if (is.null(bc$fluoLim)) bc$fluoLim <- 4100
                      cs <- load_cytoset_from_fcs(bc$fileList)
                      bc$uncompGS <- GatingSet(cs)
                      bc$gs <- gs_clone(bc$uncompGS)
@@ -5614,7 +5636,7 @@ server <- function(input, output, session) {
                      for(i in seq(bc$fluoCh)) {
                        pre <- bc$customAxis[[i]]
                        trans <- flowjo_biexp_trans(channelRange=4096,
-                                                   maxValue=262144,
+                                                   maxValue=bc$maxValue,
                                                    pos=pre[1],
                                                    neg=pre[2],
                                                    widthBasis=pre[3])
