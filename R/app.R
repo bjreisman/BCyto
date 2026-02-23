@@ -652,8 +652,10 @@ initializing <- function() {
   preFluoChannels <- preFluoChannels[preFluoChannels != "Height"]
   preFluoChannels <- preFluoChannels[preFluoChannels != "Width"]
   bc$fluoCh <- preFluoChannels
-  notNull <- vapply(spillover(cf), function(x){!is.null(x)}, TRUE)
-  spill <- spillover(cf)[notNull][[1]]
+  spill <- tryCatch({
+    notNull <- vapply(spillover(cf), function(x){!is.null(x)}, TRUE)
+    spillover(cf)[notNull][[1]]
+  }, error = function(e) NULL)
   if(is.null(spill)) {
     len <- length(bc$fluoCh)
     spill <- diag(1,len,len)
